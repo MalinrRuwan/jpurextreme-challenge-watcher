@@ -10,6 +10,7 @@ const contest = args[0];
 const headless = args.includes("--headless");
 const doLogin = args.includes("--login");
 const watchMode = args.includes("--watch");
+const leaderboardMode = args.includes("--leaderboard");
 let intervalSecs = 15;
 const i = args.indexOf("--interval");
 if (i !== -1 && args[i + 1]) intervalSecs = parseInt(args[i + 1], 10) || 15;
@@ -150,7 +151,31 @@ async function poll(page, ctx, pollNo) {
     return;
   }
   const challenges = await fetchChallenges(page, ctx);
-  const result = { contest, fetched_at: new Date().toISOString(), poll: pollNo, challenges };
+  let leaderboard = [];
+  try {
+    leaderboard = await page.evaluate(async (c) => {
+      const res = await fetch(`/rest/contests/${c}/leaderboard?offset=0&limit=100&include_practice=true`, {
+        credentials: "include",
+      });
+      if (!res.ok) return [];
+      const d = await res.json();
+      return (d.models || []).map((m) => ({
+        hacker: m.hacker,
+        rank: m.rank,
+        score: m.score,
+        time_taken: m.time_taken,
+      }));
+    }, contest);
+  } catch (e) {
+    console.error(`[poll ${pollNo}] leaderboard error: ${e.message}`);
+  }
+  const result = {
+    contest,
+    fetched_at: new Date().toISOString(),
+    poll: pollNo,
+    challenges,
+    leaderboard,
+  };
   console.log(JSON.stringify(result));
 }
 
@@ -181,6 +206,33 @@ async function main() {
 
   await page.goto(`${BASE}/challenges`, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForTimeout(2000);
+
+  if (leaderboardMode) {
+    const models = [];
+    let offset = 0;
+    let total = 0;
+    do {
+      const part = await page.evaluate(
+        async ({ c, off }) => {
+          const res = await fetch(`/rest/contests/${c}/leaderboard?offset=${off}&limit=100&include_practice=true`, {
+            credentials: "include",
+          });
+          if (!res.ok) return { total: 0, models: [], status: res.status };
+          const d = await res.json();
+          return { total: d.total || 0, models: d.models || [], status: res.status };
+        },
+        { c: contest, off: offset }
+      );
+      total = part.total;
+      models.push(...part.models);
+      offset += 100;
+    } while (models.length < total && offset < 2000);
+    console.log(
+      JSON.stringify({ contest, fetched_at: new Date().toISOString(), leaderboard: models }, null, 2)
+    );
+    await browser.close();
+    return;
+  }
 
   if (!watchMode) {
     await poll(page, ctx, 0);

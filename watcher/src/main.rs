@@ -44,12 +44,31 @@ struct Challenge {
     images: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct LeaderboardEntry {
+    #[serde(default)]
+    hacker: String,
+    #[serde(default)]
+    rank: i64,
+    #[serde(default)]
+    score: f64,
+    #[serde(default)]
+    time_taken: i64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct FetchResult {
     contest: String,
     #[serde(default)]
     fetched_at: String,
     challenges: Vec<Challenge>,
+    #[serde(default)]
+    leaderboard: Vec<LeaderboardEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaderboardResult {
+    leaderboard: Vec<LeaderboardEntry>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -220,6 +239,73 @@ fn no_solve_active() -> bool {
     !SOLVE_ON.load(Ordering::SeqCst)
 }
 
+fn fetch_leaderboard(contest: &str, headless: bool) -> Result<LeaderboardResult, String> {
+    let mut cmd = Command::new("node");
+    cmd.arg(fetch_script_path());
+    cmd.arg(contest).arg("--leaderboard");
+    if headless {
+        cmd.arg("--headless");
+    }
+    if has_credentials() {
+        cmd.arg("--login");
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to run fetch.js: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(&text).map_err(|e| format!("bad leaderboard JSON: {e}"))
+}
+
+fn fmt_time(secs: i64) -> String {
+    let s = secs.max(0);
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+fn lb_cell(entry: Option<&LeaderboardEntry>) -> String {
+    match entry {
+        Some(e) => {
+            let team: String = e.hacker.chars().take(30).collect();
+            format!(
+                "{:>5}  {:<30}  {:>6}  {:>8}",
+                e.rank,
+                team,
+                format!("{:.0}", e.score),
+                fmt_time(e.time_taken)
+            )
+        }
+        None => String::new(),
+    }
+}
+
+fn print_leaderboard(entries: &mut [LeaderboardEntry]) {
+    entries.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.time_taken.cmp(&b.time_taken))
+    });
+    for (i, e) in entries.iter_mut().enumerate() {
+        e.rank = (i + 1) as i64;
+    }
+
+    let header = format!("{:>5}  {:<30}  {:>6}  {:>8}", "RANK", "TEAM", "SCORE", "TIME");
+    println!("{header}   |   {header}");
+
+    let n = entries.len();
+    let left_count = (n + 1) / 2;
+    for r in 0..left_count {
+        let left = lb_cell(entries.get(r));
+        let right = lb_cell(entries.get(r + left_count));
+        println!("{left:<55}   |   {right}");
+    }
+    if n == 0 {
+        println!("Leaderboard is empty.");
+    }
+}
+
 fn watch_persistent(
     contest: &str,
     headless: bool,
@@ -230,6 +316,7 @@ fn watch_persistent(
     skip_current: bool,
     ring: bool,
     parallel: usize,
+    show_lb: bool,
 ) -> Result<(), String> {
     let mut cmd = Command::new("node");
     cmd.arg(fetch_script_path());
@@ -276,7 +363,11 @@ fn watch_persistent(
                 continue;
             }
             match serde_json::from_str::<FetchResult>(line) {
-                Ok(result) => {
+                Ok(mut result) => {
+                    if show_lb && !result.leaderboard.is_empty() {
+                        println!("=== LEADERBOARD (score desc, time asc) ===");
+                        print_leaderboard(&mut result.leaderboard);
+                    }
                     let new_challenges = handle_poll(&result, ring);
                     if first {
                         first = false;
@@ -508,8 +599,9 @@ fn truncate(s: &str, n: usize) -> String {
 fn usage() {
     println!(
         "hkwatch — HackerRank challenge watcher\n\n\
-Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring] [--no-vision] [--vision-model <provider/model>]\n  hkwatch solve <slug> [--headless] [--contest <slug>] [--no-vision] [--vision-model <provider/model>]\n  hkwatch status\n\n\
-Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n  --parallel <N>   max simultaneous opencode2 solves (default 2; also HKWATCH_PARALLEL env)\n\n\
+Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring] [--no-vision] [--vision-model <provider/model>] [--parallel <N>] [--show-lb]\n  hkwatch solve <slug> [--headless] [--contest <slug>] [--no-vision] [--vision-model <provider/model>]\n  hkwatch leaderboard [--headless] [--contest <slug>]\n  hkwatch status\n\n\
+Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n  --parallel <N>   max simultaneous opencode2 solves (default 2; also HKWATCH_PARALLEL env)\n  --show-lb        print the two-column team leaderboard on every poll (also HKWATCH_SHOW_LB=1)\n\n\
+Leaderboard rank = score descending, then time ascending (lowest time wins).\n\n\
 Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher (Unix only; Windows: restart with --no-solve).\n\n\
 Default contest: {DEFAULT_CONTEST}\nDefault interval: {DEFAULT_INTERVAL_SECS}s\nSolver model: {SOLVE_MODEL}\nOverride solver: HKWATCH_MODEL env or --model <provider/model>"
     );
@@ -536,6 +628,7 @@ fn main() {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2);
+    let mut show_lb = std::env::var("HKWATCH_SHOW_LB").map(|v| v != "0").unwrap_or(false);
 
     let mut iter = args.iter();
     let cmd = iter.next().unwrap();
@@ -561,6 +654,7 @@ fn main() {
                     .parse()
                     .expect("--parallel must be a number")
             }
+            "--show-lb" => show_lb = true,
             "--model" => {
                 model = iter
                     .next()
@@ -608,6 +702,7 @@ fn main() {
                 skip_current,
                 ring,
                 parallel,
+                show_lb,
             ) {
                 eprintln!("watch failed: {e}");
                 std::process::exit(1);
@@ -639,6 +734,16 @@ fn main() {
             println!("Seen challenges ({}):", seen.slugs.len());
             for s in &seen.slugs {
                 println!("  {s}");
+            }
+        }
+        "leaderboard" => {
+            let _ = fs::create_dir_all(CHALLENGES_DIR);
+            match fetch_leaderboard(&contest, headless) {
+                Ok(mut result) => print_leaderboard(&mut result.leaderboard),
+                Err(e) => {
+                    eprintln!("leaderboard failed: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         _ => {

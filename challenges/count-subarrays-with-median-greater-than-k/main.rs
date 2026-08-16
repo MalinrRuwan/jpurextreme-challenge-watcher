@@ -7,75 +7,64 @@ struct Fenwick {
 impl Fenwick {
     fn new(size: usize) -> Self {
         Fenwick {
-            tree: vec![0i64; size + 1],
+            tree: vec![0; size + 1],
         }
     }
 
-    fn add(&mut self, idx: usize, delta: i64) {
-        let n = self.tree.len();
-        let mut i = idx + 1;
-        while i < n {
-            self.tree[i] += delta;
-            i += i & i.wrapping_neg();
+    fn add(&mut self, mut idx: usize, val: i64) {
+        while idx < self.tree.len() {
+            self.tree[idx] += val;
+            idx += idx & idx.wrapping_neg();
         }
     }
 
-    fn sum(&self, idx: usize) -> i64 {
-        let mut i = idx + 1;
-        let mut s = 0i64;
-        while i > 0 {
-            s += self.tree[i];
-            i -= i & i.wrapping_neg();
+    fn sum(&self, mut idx: usize) -> i64 {
+        let mut res = 0i64;
+        while idx > 0 {
+            res += self.tree[idx];
+            idx -= idx & idx.wrapping_neg();
         }
-        s
+        res
     }
 }
 
 fn main() {
     let stdin = io::stdin();
-    let mut tokens: Vec<i64> = Vec::new();
+    let mut all: Vec<i64> = Vec::new();
     for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+        let line = line.unwrap();
         for tok in line.split_whitespace() {
-            if let Ok(v) = tok.parse::<i64>() {
-                tokens.push(v);
-            }
+            all.push(tok.parse().unwrap());
         }
     }
 
-    let n = tokens[0] as usize;
-    let k = tokens[n + 1];
+    let n = all[0] as usize;
+    let k = all[1 + n];
 
-    let size = 2 * n + 1;
+    let mut prefix = vec![0i64; n + 1];
+    for i in 0..n {
+        let d = if all[1 + i] > k { 1i64 } else { -1i64 };
+        prefix[i + 1] = prefix[i] + d;
+    }
+
+    let offset = n as i64 + 1;
+    let size = 2 * n + 3;
     let mut bit_even = Fenwick::new(size);
     let mut bit_odd = Fenwick::new(size);
 
-    let offset = n as i64;
     bit_even.add((0 + offset) as usize, 1);
 
-    let mut prefix = 0i64;
     let mut ans: i64 = 0;
-
-    for i in 1..=n {
-        prefix += if tokens[i] > k { 1 } else { -1 };
-        let idx = (prefix + offset) as usize;
-        let lower = prefix - 1 + offset;
-
-        if i & 1 == 0 {
-            ans += bit_even.sum(idx);
-            if lower >= 0 {
-                ans += bit_odd.sum(lower as usize);
-            }
-            bit_even.add(idx, 1);
+    for r in 1..=n {
+        let pr = prefix[r];
+        let idx_pr = (pr + offset) as usize;
+        let idx_pr_m1 = (pr - 1 + offset) as usize;
+        if r % 2 == 0 {
+            ans += bit_even.sum(idx_pr) + bit_odd.sum(idx_pr_m1);
+            bit_even.add(idx_pr, 1);
         } else {
-            ans += bit_odd.sum(idx);
-            if lower >= 0 {
-                ans += bit_even.sum(lower as usize);
-            }
-            bit_odd.add(idx, 1);
+            ans += bit_odd.sum(idx_pr) + bit_even.sum(idx_pr_m1);
+            bit_odd.add(idx_pr, 1);
         }
     }
 

@@ -110,11 +110,20 @@ at `watcher/target/release/hkwatch` — substitute that path.
 | `--no-solve` | Start with solve mode OFF: new challenges are reported + rung but never auto-solved; watching continues |
 | `--no-ring` | Disable the ring sound (also `HKWATCH_RING=0`) |
 | `--parallel <N>` | Max simultaneous `opencode2` solves when several new challenges are detected (default `2`; also `HKWATCH_PARALLEL`) |
+| `--show-lb` | Print the two-column team leaderboard on every poll (also `HKWATCH_SHOW_LB=1`) |
 
 When multiple unsolved challenges are found in one poll, `hkwatch watch` runs up
 to `--parallel N` solves concurrently (each in its own thread + `opencode2`
 process). `.seen.json` writes are mutex-guarded so parallel completions can't
 corrupt state, and each challenge's report prints atomically.
+
+### Leaderboard
+
+`hkwatch leaderboard` fetches the contest leaderboard through the stealth
+browser session and prints it in a two-column layout. Ranking is **score
+descending, then time ascending** (lowest time wins), independent of the rank
+HackerRank reports. `--show-lb` (or `HKWATCH_SHOW_LB=1`) prints the same table
+after every poll in watch mode.
 
 ### Runtime solve toggle (no restart)
 
@@ -158,6 +167,12 @@ HKWATCH_RING=0 ./watcher/target/release/hkwatch watch --headless --no-solve
 ./watcher/target/release/hkwatch check --headless
 ./watcher/target/release/hkwatch solve <challenge-slug>
 ./watcher/target/release/hkwatch status
+
+# Team leaderboard: two-column, ranked by score desc then time asc (lowest time wins)
+./watcher/target/release/hkwatch leaderboard --headless
+
+# Watch + print the leaderboard on every poll
+./watcher/target/release/hkwatch watch --headless --show-lb
 
 # Use a different solver model
 ./watcher/target/release/hkwatch watch --headless --model opencode/deepseek-v4-flash-free
