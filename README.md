@@ -117,13 +117,37 @@ to `--parallel N` solves concurrently (each in its own thread + `opencode2`
 process). `.seen.json` writes are mutex-guarded so parallel completions can't
 corrupt state, and each challenge's report prints atomically.
 
+### Split-screen TUI
+
+Running `watch` in a real terminal automatically enables the split-screen UI
+(`--tui` forces it on, `--no-tui` forces it off, e.g. when piping output):
+
+```
+┌LOGS (123 lines)─────────────────────┐┌LEADERBOARD (67)──────────────┐
+│Watching … every 15s                 ││  RK TEAM                 SCORE│
+│NEW: [the-great-crypto-heist] …      ││   1 UC97_SJNovaris        240│
+│Solving … with …                     ││   2 UC94_Novatrix         240│
+│OK: … all tests passed.              ││   …                        …│
+└─────────────────────────────────────┘└──────────────────────────────┘
+ solve: ON  |  q quit   ↑/↓ scroll   s toggle solve
+```
+
+- **Left column**: live scrolling log of polls, detections, solves, and results.
+- **Right column**: the team leaderboard, updated on every poll, ranked by score
+  descending then time ascending (lowest time wins).
+- Keys: `q` quit, `↑`/`↓` scroll the log, `s` toggle solve mode (same as
+  `SIGUSR1` on Unix).
+
+When stdout isn't a terminal (piped/redirected), `watch` falls back to plain
+text logs instead.
+
 ### Leaderboard
 
 `hkwatch leaderboard` fetches the contest leaderboard through the stealth
-browser session and prints it in a two-column layout. Ranking is **score
-descending, then time ascending** (lowest time wins), independent of the rank
-HackerRank reports. `--show-lb` (or `HKWATCH_SHOW_LB=1`) prints the same table
-after every poll in watch mode.
+browser session and prints it in a two-column layout (rank/team/score/time).
+Ranking is **score descending, then time ascending** (lowest time wins),
+independent of the rank HackerRank reports. `--show-lb` (or `HKWATCH_SHOW_LB=1`)
+prints the same table between polls in plain watch mode.
 
 ### Runtime solve toggle (no restart)
 

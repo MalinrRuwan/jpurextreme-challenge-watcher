@@ -1,17 +1,51 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, IsTerminal};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 static SOLVE_ON: AtomicBool = AtomicBool::new(true);
 static SEEN_LOCK: Mutex<()> = Mutex::new(());
 static REPORT_LOCK: Mutex<()> = Mutex::new(());
+static TUI_MODE: AtomicBool = AtomicBool::new(false);
+static STOP: AtomicBool = AtomicBool::new(false);
+static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+static LOG_BUFFER: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+static LEADERBOARD: Mutex<Vec<LeaderboardEntry>> = Mutex::new(Vec::new());
+
+fn log(msg: &str) {
+    if TUI_MODE.load(Ordering::SeqCst) {
+        let mut buf = LOG_BUFFER.lock().unwrap();
+        for line in msg.lines() {
+            if buf.len() >= 2000 {
+                buf.pop_front();
+            }
+            buf.push_back(line.to_string());
+        }
+    } else {
+        println!("{msg}");
+    }
+}
+
+fn log_err(msg: &str) {
+    if TUI_MODE.load(Ordering::SeqCst) {
+        let mut buf = LOG_BUFFER.lock().unwrap();
+        for line in msg.lines() {
+            if buf.len() >= 2000 {
+                buf.pop_front();
+            }
+            buf.push_back(format!("ERR: {line}"));
+        }
+    } else {
+        eprintln!("{msg}");
+    }
+}
 
 const DEFAULT_CONTEST: &str = "jpuraxtreme-3-0-inter-univeristy-section";
 const DEFAULT_INTERVAL_SECS: u64 = 15;
@@ -176,13 +210,13 @@ fn setup_solve_toggle() {
     use signal_hook::flag;
     let received = Arc::new(AtomicBool::new(false));
     if let Err(e) = flag::register(SIGUSR1, Arc::clone(&received)) {
-        eprintln!("warning: cannot register SIGUSR1 toggle: {e}");
+        log_err(&format!("warning: cannot register SIGUSR1 toggle: {e}"));
         return;
     }
     std::thread::spawn(move || loop {
         if received.swap(false, Ordering::SeqCst) {
             let prev = SOLVE_ON.fetch_xor(true, Ordering::SeqCst);
-            println!("[toggle] solve mode -> {}", if prev { "OFF" } else { "ON" });
+            log(&format!("[toggle] solve mode -> {}", if prev { "OFF" } else { "ON" }));
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     });
@@ -215,10 +249,10 @@ fn handle_poll(result: &FetchResult, ring: bool) -> Vec<Challenge> {
 
     for c in &new_challenges {
         let name = if c.name.is_empty() { &c.slug } else { &c.name };
-        println!("NEW: [{}] {}", c.slug, name);
+        log(&format!("NEW: [{}] {}", c.slug, name));
     }
     if new_challenges.is_empty() {
-        println!("No new challenges ({} seen).", seen_set.len());
+        log(&format!("No new challenges ({} seen).", seen_set.len()));
     } else if ring {
         play_ring();
     }
@@ -280,7 +314,7 @@ fn lb_cell(entry: Option<&LeaderboardEntry>) -> String {
     }
 }
 
-fn print_leaderboard(entries: &mut [LeaderboardEntry]) {
+fn sorted_entries(entries: &mut [LeaderboardEntry]) {
     entries.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -290,6 +324,16 @@ fn print_leaderboard(entries: &mut [LeaderboardEntry]) {
     for (i, e) in entries.iter_mut().enumerate() {
         e.rank = (i + 1) as i64;
     }
+}
+
+fn store_leaderboard(entries: Vec<LeaderboardEntry>) {
+    let mut v = entries;
+    sorted_entries(&mut v);
+    *LEADERBOARD.lock().unwrap() = v;
+}
+
+fn print_leaderboard(entries: &mut [LeaderboardEntry]) {
+    sorted_entries(entries);
 
     let header = format!("{:>5}  {:<30}  {:>6}  {:>8}", "RANK", "TEAM", "SCORE", "TIME");
     println!("{header}   |   {header}");
@@ -306,7 +350,7 @@ fn print_leaderboard(entries: &mut [LeaderboardEntry]) {
     }
 }
 
-fn watch_persistent(
+fn watch_loop(
     contest: &str,
     headless: bool,
     interval: u64,
@@ -330,26 +374,43 @@ fn watch_persistent(
     if has_credentials() {
         cmd.arg("--login");
     }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    println!("Watching {contest} every {interval}s (browser stays open, Ctrl-C to stop)");
+    log(&format!(
+        "Watching {contest} every {interval}s (browser stays open)"
+    ));
     #[cfg(unix)]
-    println!(
+    log(&format!(
         "Solve mode: {}. Toggle at runtime WITHOUT stopping: kill -USR1 {} (or SIGUSR1)",
         if SOLVE_ON.load(Ordering::SeqCst) { "ON" } else { "OFF" },
         std::process::id()
-    );
+    ));
     #[cfg(not(unix))]
-    println!(
+    log(&format!(
         "Solve mode: {}. Restart the watcher with --no-solve to disable solving.",
         if SOLVE_ON.load(Ordering::SeqCst) { "ON" } else { "OFF" }
-    );
+    ));
 
     let mut first = true;
-    loop {
+    while !STOP.load(Ordering::SeqCst) {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn fetch.js: {e}"))?;
+        CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("no stderr from fetch.js")?;
+        let stderr_thread = std::thread::spawn(move || {
+            let r = BufReader::new(stderr);
+            for line in r.lines() {
+                if let Ok(l) = line {
+                    log(&l);
+                }
+            }
+        });
+
         let stdout = child
             .stdout
             .take()
@@ -357,15 +418,28 @@ fn watch_persistent(
         let reader = BufReader::new(stdout);
 
         for line in reader.lines() {
-            let line = line.map_err(|e| format!("read poll line: {e}"))?;
+            if STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    log_err(&format!("read poll line: {e}"));
+                    break;
+                }
+            };
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
             match serde_json::from_str::<FetchResult>(line) {
                 Ok(mut result) => {
-                    if show_lb && !result.leaderboard.is_empty() {
-                        println!("=== LEADERBOARD (score desc, time asc) ===");
+                    if !result.leaderboard.is_empty() {
+                        store_leaderboard(result.leaderboard.clone());
+                    }
+                    if show_lb && !TUI_MODE.load(Ordering::SeqCst) && !result.leaderboard.is_empty()
+                    {
+                        log("=== LEADERBOARD (score desc, time asc) ===");
                         print_leaderboard(&mut result.leaderboard);
                     }
                     let new_challenges = handle_poll(&result, ring);
@@ -375,26 +449,26 @@ fn watch_persistent(
                             for c in &new_challenges {
                                 mark_solved(&c.slug);
                             }
-                            println!(
+                            log(&format!(
                                 "--skip-current: marked {} current challenge(s) as seen without solving.",
                                 new_challenges.len()
-                            );
+                            ));
                             continue;
                         }
                     }
                     if no_solve_active() {
                         for c in &new_challenges {
                             mark_solved(&c.slug);
-                            println!("SKIP: [{}] solve mode OFF", c.slug);
+                            log(&format!("SKIP: [{}] solve mode OFF", c.slug));
                         }
                         continue;
                     }
                     if new_challenges.len() > 1 {
-                        println!(
+                        log(&format!(
                             "Solving {} challenge(s) in parallel (parallel={})",
                             new_challenges.len(),
                             parallel
-                        );
+                        ));
                     }
                     for chunk in new_challenges.chunks(parallel.max(1)) {
                         let mut handles = Vec::new();
@@ -410,20 +484,26 @@ fn watch_persistent(
                         for h in handles {
                             match h.join() {
                                 Ok(Ok(())) => {}
-                                Ok(Err(e)) => eprintln!("solve failed: {e}"),
-                                Err(_) => eprintln!("solve thread panicked"),
+                                Ok(Err(e)) => log_err(&format!("solve failed: {e}")),
+                                Err(_) => log_err("solve thread panicked"),
                             }
                         }
                     }
                 }
-                Err(e) => eprintln!("bad poll line: {e}: {line}"),
+                Err(e) => log_err(&format!("bad poll line: {e}: {line}")),
             }
         }
 
-        let status = child.wait().map_err(|e| format!("wait: {e}"))?;
-        eprintln!("fetch.js exited with {status}, restarting in 5s...");
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        let _ = stderr_thread.join();
+        let _ = child.kill();
+        CHILD_PID.store(0, Ordering::SeqCst);
+        if STOP.load(Ordering::SeqCst) {
+            break;
+        }
+        log_err("fetch.js exited, restarting in 5s...");
+        std::thread::sleep(Duration::from_secs(5));
     }
+    Ok(())
 }
 
 fn vision_transcribe(image: &PathBuf, vision_model: &str) -> Result<String, String> {
@@ -507,21 +587,21 @@ fn solve(
             .map(|c| c.images.clone())
             .unwrap_or_default();
         if !images.is_empty() {
-            println!(
+            log(&format!(
                 "{} statement image(s) found — transcribing with {vision_model} ...",
                 images.len()
-            );
+            ));
             for img in &images {
                 let p = root.join(img);
                 if !p.exists() {
-                    eprintln!("image not found: {}", p.display());
+                    log_err(&format!("image not found: {}", p.display()));
                     continue;
                 }
                 match vision_transcribe(&p, vision_model) {
                     Ok(t) => text.push_str(&format!(
                         "\n\nIMAGE TRANSCRIPTION ({img}):\n{t}"
                     )),
-                    Err(e) => eprintln!("vision transcription failed for {img}: {e}"),
+                    Err(e) => log_err(&format!("vision transcription failed for {img}: {e}")),
                 }
             }
         }
@@ -536,7 +616,7 @@ Do not modify anything outside {dir}.",
         dir = dir.display()
     );
 
-    println!("Solving {slug} with {model} ...");
+    log(&format!("Solving {slug} with {model} ..."));
 
     let out = Command::new("opencode2")
         .arg("run")
@@ -553,11 +633,14 @@ Do not modify anything outside {dir}.",
         .map_err(|e| format!("failed to run opencode2: {e}"))?;
 
     if !out.status.success() {
-        eprintln!("opencode2 stderr:\n{}", String::from_utf8_lossy(&out.stderr));
+        log_err(&format!(
+            "opencode2 stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
         return Err(format!("opencode2 exited with {}", out.status));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    println!("{}", truncate(&stdout, 4000));
+    log(&truncate(&stdout, 4000));
 
     let main_rs = dir.join("main.rs");
     if !main_rs.exists() {
@@ -571,18 +654,18 @@ Do not modify anything outside {dir}.",
         .map_err(|e| format!("failed to run tests.sh: {e}"))?;
 
     let _g = REPORT_LOCK.lock().unwrap();
-    println!("=== [{slug}] solve report ===");
-    println!("tests.sh exit: {}", test.status);
-    println!("{}", truncate(&String::from_utf8_lossy(&test.stdout), 2000));
+    log(&format!("=== [{slug}] solve report ==="));
+    log(&format!("tests.sh exit: {}", test.status));
+    log(&truncate(&String::from_utf8_lossy(&test.stdout), 2000));
     if !test.stdout.is_empty() {
-        eprintln!("{}", truncate(&String::from_utf8_lossy(&test.stderr), 2000));
+        log_err(&truncate(&String::from_utf8_lossy(&test.stderr), 2000));
     }
 
     mark_solved(slug);
     if test.status.success() {
-        println!("OK: {slug} all tests passed.");
+        log(&format!("OK: {slug} all tests passed."));
     } else {
-        println!("FAIL: {slug} tests failed.");
+        log(&format!("FAIL: {slug} tests failed."));
     }
     Ok(())
 }
@@ -596,11 +679,137 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+fn run_tui() -> Result<(), String> {
+    use crossterm::event::{self, Event, KeyCode};
+    use crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+    use crossterm::execute;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Modifier, Style};
+    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+    use ratatui::Terminal;
+
+    enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen).map_err(|e| format!("alt screen: {e}"))?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal: {e}"))?;
+
+    let mut scroll: usize = 0;
+    let mut quit = false;
+
+    let result = (|| -> Result<(), String> {
+        while !quit {
+            terminal.draw(|f| {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .split(f.area());
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(3), Constraint::Length(1)])
+                    .split(cols[0]);
+
+                let logs: Vec<String> = LOG_BUFFER.lock().unwrap().iter().cloned().collect();
+                let cap = (rows[0].height as usize).saturating_sub(2);
+                let start = logs.len().saturating_sub(cap).min(scroll);
+                let items: Vec<ListItem> = logs
+                    .iter()
+                    .skip(start)
+                    .cloned()
+                    .map(ListItem::new)
+                    .collect();
+                let title = format!("LOGS ({} lines)", logs.len());
+                let list = List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title(title));
+                f.render_widget(list, rows[0]);
+
+                let status = if SOLVE_ON.load(Ordering::SeqCst) {
+                    "solve: ON"
+                } else {
+                    "solve: OFF"
+                };
+                let footer = Paragraph::new(format!(
+                    " {status}  |  q quit   ↑/↓ scroll   s toggle solve"
+                ))
+                .style(Style::default().add_modifier(Modifier::BOLD));
+                f.render_widget(footer, rows[1]);
+
+                let lb = LEADERBOARD.lock().unwrap().clone();
+                let mut lines = vec![ratatui::text::Line::from(format!(
+                    "{:>4}  {:<20}  {:>5}  {:>8}",
+                    "RK", "TEAM", "SCORE", "TIME"
+                ))];
+                for e in &lb {
+                    lines.push(ratatui::text::Line::from(format!(
+                        "{:>4}  {:<20}  {:>5}  {:>8}",
+                        e.rank,
+                        e.hacker.chars().take(20).collect::<String>(),
+                        format!("{:.0}", e.score),
+                        fmt_time(e.time_taken)
+                    )));
+                }
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("LEADERBOARD ({})", lb.len()));
+                f.render_widget(Paragraph::new(lines).block(block), cols[1]);
+            })
+            .map_err(|e| format!("draw: {e}"))?;
+
+            if event::poll(Duration::from_millis(500)).map_err(|e| format!("poll: {e}"))? {
+                if let Event::Key(k) = event::read().map_err(|e| format!("read: {e}"))? {
+                    match k.code {
+                        KeyCode::Char('q') => quit = true,
+                        KeyCode::Char('s') => {
+                            let prev = SOLVE_ON.fetch_xor(true, Ordering::SeqCst);
+                            log(&format!(
+                                "[toggle] solve mode -> {}",
+                                if prev { "OFF" } else { "ON" }
+                            ));
+                        }
+                        KeyCode::Up => scroll += 1,
+                        KeyCode::Down => scroll = scroll.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    disable_raw_mode().map_err(|e| format!("unraw: {e}"))?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+        .map_err(|e| format!("leave alt screen: {e}"))?;
+    terminal.show_cursor().ok();
+
+    result
+}
+
+fn stop_watch() {
+    STOP.store(true, Ordering::SeqCst);
+    let pid = CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+        #[cfg(windows)]
+        let _ = Command::new("taskkill")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/F")
+            .status();
+    }
+}
+
 fn usage() {
     println!(
         "hkwatch — HackerRank challenge watcher\n\n\
 Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring] [--no-vision] [--vision-model <provider/model>] [--parallel <N>] [--show-lb]\n  hkwatch solve <slug> [--headless] [--contest <slug>] [--no-vision] [--vision-model <provider/model>]\n  hkwatch leaderboard [--headless] [--contest <slug>]\n  hkwatch status\n\n\
-Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n  --parallel <N>   max simultaneous opencode2 solves (default 2; also HKWATCH_PARALLEL env)\n  --show-lb        print the two-column team leaderboard on every poll (also HKWATCH_SHOW_LB=1)\n\n\
+Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n  --parallel <N>   max simultaneous opencode2 solves (default 2; also HKWATCH_PARALLEL env)\n  --show-lb        print the two-column team leaderboard on every poll (also HKWATCH_SHOW_LB=1)\n  --tui            split-screen UI: logs (left) + live leaderboard (right); auto-enabled on a terminal (--no-tui to force off)\n\n\
 Leaderboard rank = score descending, then time ascending (lowest time wins).\n\n\
 Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher (Unix only; Windows: restart with --no-solve).\n\n\
 Default contest: {DEFAULT_CONTEST}\nDefault interval: {DEFAULT_INTERVAL_SECS}s\nSolver model: {SOLVE_MODEL}\nOverride solver: HKWATCH_MODEL env or --model <provider/model>"
@@ -629,6 +838,7 @@ fn main() {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(2);
     let mut show_lb = std::env::var("HKWATCH_SHOW_LB").map(|v| v != "0").unwrap_or(false);
+    let mut tui: Option<bool> = None;
 
     let mut iter = args.iter();
     let cmd = iter.next().unwrap();
@@ -655,6 +865,8 @@ fn main() {
                     .expect("--parallel must be a number")
             }
             "--show-lb" => show_lb = true,
+            "--tui" => tui = Some(true),
+            "--no-tui" => tui = Some(false),
             "--model" => {
                 model = iter
                     .next()
@@ -692,7 +904,39 @@ fn main() {
         "watch" => {
             #[cfg(unix)]
             setup_solve_toggle();
-            if let Err(e) = watch_persistent(
+            let use_tui = tui.unwrap_or(std::io::stdout().is_terminal());
+            if use_tui {
+                TUI_MODE.store(true, Ordering::SeqCst);
+                let contest = contest.clone();
+                let model = model.clone();
+                let vision_model = vision_model.clone();
+                let handle = std::thread::spawn(move || {
+                    let _ = watch_loop(
+                        &contest,
+                        headless,
+                        interval,
+                        &model,
+                        &vision_model,
+                        use_vision,
+                        skip_current,
+                        ring,
+                        parallel,
+                        show_lb,
+                    );
+                });
+                match run_tui() {
+                    Ok(()) => {
+                        stop_watch();
+                        let _ = handle.join();
+                    }
+                    Err(e) => {
+                        eprintln!("tui error: {e}");
+                        stop_watch();
+                        let _ = handle.join();
+                        std::process::exit(1);
+                    }
+                }
+            } else if let Err(e) = watch_loop(
                 &contest,
                 headless,
                 interval,
