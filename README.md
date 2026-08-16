@@ -13,8 +13,10 @@ write a Rust solution, and runs its sample tests.
    login cookies apply). It also downloads any `<img>` embedded in a statement
    to `challenges/<slug>/statement_<n>.<ext>`.
 2. **`watcher/`** — a Rust CLI (`hkwatch`) that polls, diffs, and dispatches.
-3. **`challenges/`** — one folder per challenge: `main.rs`, `tests.sh`, and the
-   compiled `main` binary.
+3. **`challenges/`** — runtime-only, one folder per solved challenge
+   (`main.rs`, `tests.sh`). Generated on disk as challenges are fetched/solved;
+   it is **gitignored** and never part of the source tree. Deleting it is safe —
+   the watcher recreates it.
 
 ## Setup
 
@@ -261,8 +263,9 @@ For each new challenge slug, `hkwatch solve`:
 
 ## Notes
 
-- `challenges/.seen.json` is the source of truth for "already seen" slugs;
-  delete a slug from it to force a re-solve.
+- `challenges/.seen.json` is the local source of truth for "already seen"
+  slugs; delete a slug from it to force a re-solve. The whole `challenges/`
+  folder is runtime state and is gitignored.
 - The default solver `opencode-go/deepseek-v4-flash` was chosen because the
   requested `opencode/deepseek-v4-flash` is out of balance on the current
   opencode workspace (HTTP 401 Insufficient balance).

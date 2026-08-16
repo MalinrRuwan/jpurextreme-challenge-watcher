@@ -8,12 +8,12 @@ node_modules/
 # rust build
 watcher/target/
 
+# runtime challenge state — generated per solved challenge, not source
+challenges/
+
 # release artifacts
 dist/
 bin/
 
 # compiled challenge binaries
 challenges/*/main
-
-# runtime cache
-challenges/.last_fetch.json
