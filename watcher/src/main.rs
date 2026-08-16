@@ -18,6 +18,41 @@ static STOP: AtomicBool = AtomicBool::new(false);
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static LOG_BUFFER: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static LEADERBOARD: Mutex<Vec<LeaderboardEntry>> = Mutex::new(Vec::new());
+static SOLVE_STATE: Mutex<Vec<SolveEntry>> = Mutex::new(Vec::new());
+
+#[derive(Clone)]
+struct SolveEntry {
+    name: String,
+    status: String,
+}
+
+fn solve_started(name: &str) {
+    let mut v = SOLVE_STATE.lock().unwrap();
+    v.retain(|e| e.name != name);
+    v.push(SolveEntry {
+        name: name.to_string(),
+        status: "solving".to_string(),
+    });
+}
+
+fn solve_finished(name: &str, ok: bool) {
+    let mut v = SOLVE_STATE.lock().unwrap();
+    if let Some(e) = v.iter_mut().find(|e| e.name == name) {
+        e.status = if ok { "OK".into() } else { "FAIL".into() };
+    } else {
+        v.push(SolveEntry {
+            name: name.to_string(),
+            status: if ok { "OK" } else { "FAIL" }.into(),
+        });
+    }
+    while v.len() > 12 {
+        if let Some(pos) = v.iter().position(|e| e.status != "solving") {
+            v.remove(pos);
+        } else {
+            break;
+        }
+    }
+}
 
 fn log(msg: &str) {
     if TUI_MODE.load(Ordering::SeqCst) {
@@ -560,6 +595,17 @@ fn solve(
     let dir = root.join(CHALLENGES_DIR).join(slug);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
+    let display_name = challenge
+        .and_then(|c| {
+            if c.name.is_empty() {
+                None
+            } else {
+                Some(c.name.clone())
+            }
+        })
+        .unwrap_or_else(|| slug.to_string());
+    solve_started(&display_name);
+
     let mut text = match challenge {
         Some(c) => {
             let stmt = if !c.body_html.is_empty() {
@@ -637,6 +683,7 @@ Do not modify anything outside {dir}.",
             "opencode2 stderr:\n{}",
             String::from_utf8_lossy(&out.stderr)
         ));
+        solve_finished(&display_name, false);
         return Err(format!("opencode2 exited with {}", out.status));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -644,6 +691,7 @@ Do not modify anything outside {dir}.",
 
     let main_rs = dir.join("main.rs");
     if !main_rs.exists() {
+        solve_finished(&display_name, false);
         return Err("main.rs was not produced".into());
     }
 
@@ -661,8 +709,10 @@ Do not modify anything outside {dir}.",
         log_err(&truncate(&String::from_utf8_lossy(&test.stderr), 2000));
     }
 
+    let ok = test.status.success();
+    solve_finished(&display_name, ok);
     mark_solved(slug);
-    if test.status.success() {
+    if ok {
         log(&format!("OK: {slug} all tests passed."));
     } else {
         log(&format!("FAIL: {slug} tests failed."));
@@ -703,17 +753,38 @@ fn run_tui() -> Result<(), String> {
     let result = (|| -> Result<(), String> {
         while !quit {
             terminal.draw(|f| {
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                    .split(f.area());
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Min(3), Constraint::Length(1)])
-                    .split(cols[0]);
+                    .split(f.area());
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(30),
+                        Constraint::Percentage(45),
+                        Constraint::Percentage(25),
+                    ])
+                    .split(rows[0]);
 
+                // column 0: live opencode solves -> challenge names
+                let solves = SOLVE_STATE.lock().unwrap().clone();
+                let active = solves.iter().filter(|e| e.status == "solving").count();
+                let mut s_lines = vec![ratatui::text::Line::from(format!(
+                    "{:<26}  {:>7}",
+                    "CHALLENGE", "STATUS"
+                ))];
+                for e in &solves {
+                    let name: String = e.name.chars().take(26).collect();
+                    s_lines.push(ratatui::text::Line::from(format!("{name:<26}  {:>7}", e.status)));
+                }
+                let s_block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("SOLVES ({} active)", active));
+                f.render_widget(Paragraph::new(s_lines).block(s_block), cols[0]);
+
+                // column 1: logs
                 let logs: Vec<String> = LOG_BUFFER.lock().unwrap().iter().cloned().collect();
-                let cap = (rows[0].height as usize).saturating_sub(2);
+                let cap = (cols[1].height as usize).saturating_sub(2);
                 let start = logs.len().saturating_sub(cap).min(scroll);
                 let items: Vec<ListItem> = logs
                     .iter()
@@ -724,19 +795,9 @@ fn run_tui() -> Result<(), String> {
                 let title = format!("LOGS ({} lines)", logs.len());
                 let list = List::new(items)
                     .block(Block::default().borders(Borders::ALL).title(title));
-                f.render_widget(list, rows[0]);
+                f.render_widget(list, cols[1]);
 
-                let status = if SOLVE_ON.load(Ordering::SeqCst) {
-                    "solve: ON"
-                } else {
-                    "solve: OFF"
-                };
-                let footer = Paragraph::new(format!(
-                    " {status}  |  q quit   ↑/↓ scroll   s toggle solve"
-                ))
-                .style(Style::default().add_modifier(Modifier::BOLD));
-                f.render_widget(footer, rows[1]);
-
+                // column 2: leaderboard
                 let lb = LEADERBOARD.lock().unwrap().clone();
                 let mut lines = vec![ratatui::text::Line::from(format!(
                     "{:>4}  {:<20}  {:>5}  {:>8}",
@@ -754,7 +815,19 @@ fn run_tui() -> Result<(), String> {
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .title(format!("LEADERBOARD ({})", lb.len()));
-                f.render_widget(Paragraph::new(lines).block(block), cols[1]);
+                f.render_widget(Paragraph::new(lines).block(block), cols[2]);
+
+                // footer
+                let status = if SOLVE_ON.load(Ordering::SeqCst) {
+                    "solve: ON"
+                } else {
+                    "solve: OFF"
+                };
+                let footer = Paragraph::new(format!(
+                    " {status}  |  q quit   ↑/↓ scroll   s toggle solve"
+                ))
+                .style(Style::default().add_modifier(Modifier::BOLD));
+                f.render_widget(footer, rows[1]);
             })
             .map_err(|e| format!("draw: {e}"))?;
 
