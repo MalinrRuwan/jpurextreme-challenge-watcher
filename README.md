@@ -68,6 +68,24 @@ Run from the repo root.
 | `--headless` | Run the stealth browser headless |
 | `--interval <secs>` | Poll interval for `watch` (default `15`) |
 | `--model <provider/model>` | Solver model (default `opencode-go/deepseek-v4-flash`); also `HKWATCH_MODEL` env var |
+| `--no-solve` | Start with solve mode OFF: new challenges are reported + rung but never auto-solved; watching continues |
+| `--no-ring` | Disable the ring sound (also `HKWATCH_RING=0`) |
+
+### Runtime solve toggle (no restart)
+
+While `watch` is running, send `SIGUSR1` to toggle auto-solving on/off. The
+watcher keeps running and polling the whole time — only the solve step is
+enabled/disabled.
+
+```sh
+hkwatch watch   # prints "kill -USR1 <pid>" on startup
+kill -USR1 <pid>   # toggle solve mode OFF -> reports new challenges, doesn't solve
+kill -USR1 <pid>   # toggle solve mode back ON
+```
+
+While OFF, detected challenges are marked as seen (so they aren't re-rung on
+every poll) but not solved. To solve one later, run `hkwatch solve <slug>` or
+remove its slug from `challenges/.seen.json` and let the watcher pick it up.
 
 ## Solve flow
 

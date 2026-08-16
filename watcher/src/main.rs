@@ -4,6 +4,10 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SOLVE_ON: AtomicBool = AtomicBool::new(true);
 
 const DEFAULT_CONTEST: &str = "jpuraxtreme-3-0-inter-univeristy-section";
 const DEFAULT_INTERVAL_SECS: u64 = 15;
@@ -120,6 +124,23 @@ fn mark_solved(slug: &str) {
     }
 }
 
+fn setup_solve_toggle() {
+    use signal_hook::consts::signal::SIGUSR1;
+    use signal_hook::flag;
+    let received = Arc::new(AtomicBool::new(false));
+    if let Err(e) = flag::register(SIGUSR1, Arc::clone(&received)) {
+        eprintln!("warning: cannot register SIGUSR1 toggle: {e}");
+        return;
+    }
+    std::thread::spawn(move || loop {
+        if received.swap(false, Ordering::SeqCst) {
+            let prev = SOLVE_ON.fetch_xor(true, Ordering::SeqCst);
+            println!("[toggle] solve mode -> {}", if prev { "OFF" } else { "ON" });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    });
+}
+
 fn play_ring() {
     let _ = Command::new("afplay")
         .arg("/System/Library/Sounds/Glass.aiff")
@@ -167,12 +188,15 @@ fn has_credentials() -> bool {
         && !std::env::var("HKWATCH_PASSWORD").unwrap_or_default().is_empty()
 }
 
+fn no_solve_active() -> bool {
+    !SOLVE_ON.load(Ordering::SeqCst)
+}
+
 fn watch_persistent(
     contest: &str,
     headless: bool,
     interval: u64,
     model: &str,
-    no_solve: bool,
     skip_current: bool,
     ring: bool,
 ) -> Result<(), String> {
@@ -192,9 +216,11 @@ fn watch_persistent(
     cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
 
     println!("Watching {contest} every {interval}s (browser stays open, Ctrl-C to stop)");
-    if no_solve {
-        println!("--no-solve: new challenges will be reported and rung, not solved.");
-    }
+    println!(
+        "Solve mode: {}. Toggle at runtime WITHOUT stopping: kill -USR1 {} (or SIGUSR1)",
+        if SOLVE_ON.load(Ordering::SeqCst) { "ON" } else { "OFF" },
+        std::process::id()
+    );
 
     let mut first = true;
     loop {
@@ -229,7 +255,11 @@ fn watch_persistent(
                             continue;
                         }
                     }
-                    if no_solve {
+                    if no_solve_active() {
+                        for c in &new_challenges {
+                            mark_solved(&c.slug);
+                            println!("SKIP: [{}] solve mode OFF", c.slug);
+                        }
                         continue;
                     }
                     for c in new_challenges {
@@ -346,7 +376,8 @@ fn usage() {
     println!(
         "hkwatch — HackerRank challenge watcher\n\n\
 Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring]\n  hkwatch solve <slug> [--headless] [--contest <slug>]\n  hkwatch status\n\n\
-Flags:\n  --no-solve       report new challenges (with ring) but never auto-solve\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n\n\
+Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n\n\
+Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher.\n\n\
 Default contest: {DEFAULT_CONTEST}\nDefault interval: {DEFAULT_INTERVAL_SECS}s\nSolver model: {SOLVE_MODEL}\nOverride solver: HKWATCH_MODEL env or --model <provider/model>"
     );
 }
@@ -363,7 +394,6 @@ fn main() {
     let mut headless = false;
     let mut interval = DEFAULT_INTERVAL_SECS;
     let mut model = std::env::var("HKWATCH_MODEL").unwrap_or_else(|_| SOLVE_MODEL.to_string());
-    let mut no_solve = false;
     let mut skip_current = false;
     let mut ring = std::env::var("HKWATCH_RING").map(|v| v != "0").unwrap_or(true);
 
@@ -374,7 +404,7 @@ fn main() {
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--headless" => headless = true,
-            "--no-solve" => no_solve = true,
+            "--no-solve" => SOLVE_ON.store(false, Ordering::SeqCst),
             "--skip-current" => skip_current = true,
             "--no-ring" => ring = false,
             "--model" => {
@@ -412,7 +442,8 @@ fn main() {
             }
         }
         "watch" => {
-            if let Err(e) = watch_persistent(&contest, headless, interval, &model, no_solve, skip_current, ring)
+            setup_solve_toggle();
+            if let Err(e) = watch_persistent(&contest, headless, interval, &model, skip_current, ring)
             {
                 eprintln!("watch failed: {e}");
                 std::process::exit(1);
