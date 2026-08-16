@@ -109,6 +109,12 @@ at `watcher/target/release/hkwatch` — substitute that path.
 | `--model <provider/model>` | Solver model (default `opencode-go/deepseek-v4-flash`); also `HKWATCH_MODEL` env var |
 | `--no-solve` | Start with solve mode OFF: new challenges are reported + rung but never auto-solved; watching continues |
 | `--no-ring` | Disable the ring sound (also `HKWATCH_RING=0`) |
+| `--parallel <N>` | Max simultaneous `opencode2` solves when several new challenges are detected (default `2`; also `HKWATCH_PARALLEL`) |
+
+When multiple unsolved challenges are found in one poll, `hkwatch watch` runs up
+to `--parallel N` solves concurrently (each in its own thread + `opencode2`
+process). `.seen.json` writes are mutex-guarded so parallel completions can't
+corrupt state, and each challenge's report prints atomically.
 
 ### Runtime solve toggle (no restart)
 
@@ -155,6 +161,10 @@ HKWATCH_RING=0 ./watcher/target/release/hkwatch watch --headless --no-solve
 
 # Use a different solver model
 ./watcher/target/release/hkwatch watch --headless --model opencode/deepseek-v4-flash-free
+
+# Solve several new challenges concurrently (default parallel=2)
+./watcher/target/release/hkwatch watch --headless --parallel 4
+HKWATCH_PARALLEL=4 ./watcher/target/release/hkwatch watch --headless
 
 # Force a re-solve: drop the slug from .seen.json, then watch
 # (or solve it directly from the last fetched statement)

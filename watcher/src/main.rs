@@ -7,8 +7,11 @@ use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 static SOLVE_ON: AtomicBool = AtomicBool::new(true);
+static SEEN_LOCK: Mutex<()> = Mutex::new(());
+static REPORT_LOCK: Mutex<()> = Mutex::new(());
 
 const DEFAULT_CONTEST: &str = "jpuraxtreme-3-0-inter-univeristy-section";
 const DEFAULT_INTERVAL_SECS: u64 = 15;
@@ -139,6 +142,7 @@ fn load_last_fetch() -> Option<FetchResult> {
 }
 
 fn mark_solved(slug: &str) {
+    let _g = SEEN_LOCK.lock().unwrap();
     let mut seen = load_seen();
     if !seen.slugs.iter().any(|s| s == slug) {
         seen.slugs.push(slug.to_string());
@@ -225,6 +229,7 @@ fn watch_persistent(
     use_vision: bool,
     skip_current: bool,
     ring: bool,
+    parallel: usize,
 ) -> Result<(), String> {
     let mut cmd = Command::new("node");
     cmd.arg(fetch_script_path());
@@ -293,9 +298,30 @@ fn watch_persistent(
                         }
                         continue;
                     }
-                    for c in new_challenges {
-                        if let Err(e) = solve(&c.slug, Some(&c), model, vision_model, use_vision) {
-                            eprintln!("solve {} failed: {e}", c.slug);
+                    if new_challenges.len() > 1 {
+                        println!(
+                            "Solving {} challenge(s) in parallel (parallel={})",
+                            new_challenges.len(),
+                            parallel
+                        );
+                    }
+                    for chunk in new_challenges.chunks(parallel.max(1)) {
+                        let mut handles = Vec::new();
+                        for c in chunk {
+                            let slug = c.slug.clone();
+                            let challenge = c.clone();
+                            let model = model.to_string();
+                            let vision_model = vision_model.to_string();
+                            handles.push(std::thread::spawn(move || {
+                                solve(&slug, Some(&challenge), &model, &vision_model, use_vision)
+                            }));
+                        }
+                        for h in handles {
+                            match h.join() {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => eprintln!("solve failed: {e}"),
+                                Err(_) => eprintln!("solve thread panicked"),
+                            }
                         }
                     }
                 }
@@ -453,6 +479,8 @@ Do not modify anything outside {dir}.",
         .output()
         .map_err(|e| format!("failed to run tests.sh: {e}"))?;
 
+    let _g = REPORT_LOCK.lock().unwrap();
+    println!("=== [{slug}] solve report ===");
     println!("tests.sh exit: {}", test.status);
     println!("{}", truncate(&String::from_utf8_lossy(&test.stdout), 2000));
     if !test.stdout.is_empty() {
@@ -481,7 +509,7 @@ fn usage() {
     println!(
         "hkwatch — HackerRank challenge watcher\n\n\
 Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring] [--no-vision] [--vision-model <provider/model>]\n  hkwatch solve <slug> [--headless] [--contest <slug>] [--no-vision] [--vision-model <provider/model>]\n  hkwatch status\n\n\
-Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n\n\
+Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n  --parallel <N>   max simultaneous opencode2 solves (default 2; also HKWATCH_PARALLEL env)\n\n\
 Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher (Unix only; Windows: restart with --no-solve).\n\n\
 Default contest: {DEFAULT_CONTEST}\nDefault interval: {DEFAULT_INTERVAL_SECS}s\nSolver model: {SOLVE_MODEL}\nOverride solver: HKWATCH_MODEL env or --model <provider/model>"
     );
@@ -504,6 +532,10 @@ fn main() {
     let mut vision_model = std::env::var("HKWATCH_VISION_MODEL")
         .unwrap_or_else(|_| VISION_MODEL.to_string());
     let mut use_vision = true;
+    let mut parallel = std::env::var("HKWATCH_PARALLEL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2);
 
     let mut iter = args.iter();
     let cmd = iter.next().unwrap();
@@ -521,6 +553,13 @@ fn main() {
                     .next()
                     .expect("--vision-model requires a value")
                     .clone()
+            }
+            "--parallel" => {
+                parallel = iter
+                    .next()
+                    .expect("--parallel requires a value")
+                    .parse()
+                    .expect("--parallel must be a number")
             }
             "--model" => {
                 model = iter
@@ -568,6 +607,7 @@ fn main() {
                 use_vision,
                 skip_current,
                 ring,
+                parallel,
             ) {
                 eprintln!("watch failed: {e}");
                 std::process::exit(1);

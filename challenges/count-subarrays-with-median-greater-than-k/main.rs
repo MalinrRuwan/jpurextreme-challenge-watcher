@@ -2,92 +2,80 @@ use std::io::{self, BufRead};
 
 struct Fenwick {
     tree: Vec<i64>,
-    n: usize,
 }
 
 impl Fenwick {
-    fn new(n: usize) -> Self {
+    fn new(size: usize) -> Self {
         Fenwick {
-            tree: vec![0i64; n + 1],
-            n,
+            tree: vec![0i64; size + 1],
         }
     }
 
-    fn add(&mut self, mut i: usize, delta: i64) {
-        i += 1;
-        while i <= self.n {
+    fn add(&mut self, idx: usize, delta: i64) {
+        let n = self.tree.len();
+        let mut i = idx + 1;
+        while i < n {
             self.tree[i] += delta;
-            i += i & (!i + 1);
+            i += i & i.wrapping_neg();
         }
     }
 
-    fn prefix(&self, mut i: usize) -> i64 {
-        let mut sum = 0i64;
+    fn sum(&self, idx: usize) -> i64 {
+        let mut i = idx + 1;
+        let mut s = 0i64;
         while i > 0 {
-            sum += self.tree[i];
-            i -= i & (!i + 1);
+            s += self.tree[i];
+            i -= i & i.wrapping_neg();
         }
-        sum
-    }
-
-    fn count_le(&self, v: i64, n: i64) -> i64 {
-        if v < -n {
-            return 0;
-        }
-        let idx = (v + n) as usize;
-        self.prefix(idx + 1)
+        s
     }
 }
 
 fn main() {
     let stdin = io::stdin();
-    let mut data = String::new();
+    let mut tokens: Vec<i64> = Vec::new();
     for line in stdin.lock().lines() {
-        match line {
-            Ok(l) => {
-                data.push_str(&l);
-                data.push(' ');
-            }
+        let line = match line {
+            Ok(l) => l,
             Err(_) => break,
+        };
+        for tok in line.split_whitespace() {
+            if let Ok(v) = tok.parse::<i64>() {
+                tokens.push(v);
+            }
         }
     }
 
-    let nums: Vec<i64> = data
-        .split_whitespace()
-        .map(|t| t.parse().unwrap())
-        .collect();
+    let n = tokens[0] as usize;
+    let k = tokens[n + 1];
 
-    let n = nums[0] as usize;
-    let arr = &nums[1..1 + n];
-    let k = nums[1 + n];
+    let size = 2 * n + 1;
+    let mut bit_even = Fenwick::new(size);
+    let mut bit_odd = Fenwick::new(size);
 
-    let mut s = vec![0i64; n + 1];
-    for i in 0..n {
-        s[i + 1] = s[i] + if arr[i] > k { 1 } else { -1 };
-    }
+    let offset = n as i64;
+    bit_even.add((0 + offset) as usize, 1);
 
-    let size = 2 * n + 2;
-    let nf = n as i64;
-    let mut bit0 = Fenwick::new(size);
-    let mut bit1 = Fenwick::new(size);
-
-    bit0.add(0, 1);
-
+    let mut prefix = 0i64;
     let mut ans: i64 = 0;
-    for j in 1..=n {
-        let sj = s[j];
-        if j % 2 == 0 {
-            ans += bit0.count_le(sj, nf);
-            ans += bit1.count_le(sj - 1, nf);
-        } else {
-            ans += bit1.count_le(sj, nf);
-            ans += bit0.count_le(sj - 1, nf);
-        }
 
-        if j % 2 == 0 {
-            bit0.add((sj + nf) as usize, 1);
+    for i in 1..=n {
+        prefix += if tokens[i] > k { 1 } else { -1 };
+        let idx = (prefix + offset) as usize;
+        let lower = prefix - 1 + offset;
+
+        if i & 1 == 0 {
+            ans += bit_even.sum(idx);
+            if lower >= 0 {
+                ans += bit_odd.sum(lower as usize);
+            }
+            bit_even.add(idx, 1);
         } else {
-            bit1.add((sj + nf) as usize, 1);
+            ans += bit_odd.sum(idx);
+            if lower >= 0 {
+                ans += bit_even.sum(lower as usize);
+            }
+            bit_odd.add(idx, 1);
         }
     }
 
