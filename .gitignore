@@ -1,0 +1,15 @@
+# secrets
+.hkwatch.env
+.env
+
+# node
+node_modules/
+
+# rust build
+watcher/target/
+
+# compiled challenge binaries
+challenges/*/main
+
+# runtime cache
+challenges/.last_fetch.json
