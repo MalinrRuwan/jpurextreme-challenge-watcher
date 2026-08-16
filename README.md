@@ -17,6 +17,14 @@ write a Rust solution, and runs its sample tests.
    (`main.rs`, `tests.sh`). Generated on disk as challenges are fetched/solved;
    it is **gitignored** and never part of the source tree. Deleting it is safe —
    the watcher recreates it.
+4. **`state/`** — runtime-only bookkeeping: `.seen.json` (challenges already
+   handled) and `.last_fetch.json` (last fetched payload). Gitignored like
+   `challenges/`.
+
+Already-solved detection: each poll includes the site's `solved` flag per
+challenge. Challenges the account has already solved on HackerRank are marked
+seen **without** being solved again, so the watcher never re-solves
+submissions that already have a score.
 
 ## Setup
 
@@ -263,9 +271,9 @@ For each new challenge slug, `hkwatch solve`:
 
 ## Notes
 
-- `challenges/.seen.json` is the local source of truth for "already seen"
-  slugs; delete a slug from it to force a re-solve. The whole `challenges/`
-  folder is runtime state and is gitignored.
+- `state/.seen.json` is the local source of truth for "already seen" slugs;
+  delete a slug from it to force a re-solve. The `challenges/` and `state/`
+  folders are runtime state and are gitignored.
 - The default solver `opencode-go/deepseek-v4-flash` was chosen because the
   requested `opencode/deepseek-v4-flash` is out of balance on the current
   opencode workspace (HTTP 401 Insufficient balance).

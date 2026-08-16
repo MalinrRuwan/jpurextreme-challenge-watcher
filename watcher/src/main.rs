@@ -86,8 +86,9 @@ const DEFAULT_CONTEST: &str = "jpuraxtreme-3-0-inter-univeristy-section";
 const DEFAULT_INTERVAL_SECS: u64 = 15;
 const FETCH_SCRIPT: &str = "cloak/fetch.js";
 const CHALLENGES_DIR: &str = "challenges";
-const SEEN_FILE: &str = "challenges/.seen.json";
-const LAST_FETCH_FILE: &str = "challenges/.last_fetch.json";
+const STATE_DIR: &str = "state";
+const SEEN_FILE: &str = "state/.seen.json";
+const LAST_FETCH_FILE: &str = "state/.last_fetch.json";
 const SOLVE_MODEL: &str = "opencode-go/deepseek-v4-flash";
 const VISION_MODEL: &str = "opencode-go/qwen3.7-plus";
 const ENV_FILE: &str = ".hkwatch.env";
@@ -111,6 +112,8 @@ struct Challenge {
     url: String,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    solved: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -218,7 +221,7 @@ fn load_seen() -> Seen {
 }
 
 fn save_seen(seen: &Seen) {
-    let _ = fs::create_dir_all(CHALLENGES_DIR);
+    let _ = fs::create_dir_all(STATE_DIR);
     let json = serde_json::to_string_pretty(seen).unwrap();
     let _ = fs::write(SEEN_FILE, json);
 }
@@ -270,28 +273,38 @@ fn play_ring() {
 }
 
 fn handle_poll(result: &FetchResult, ring: bool) -> Vec<Challenge> {
-    let _ = fs::create_dir_all(CHALLENGES_DIR);
+    let _ = fs::create_dir_all(STATE_DIR);
     let _ = fs::write(LAST_FETCH_FILE, serde_json::to_string_pretty(result).unwrap());
 
     let seen = load_seen();
     let seen_set: BTreeSet<&str> = seen.slugs.iter().map(|s| s.as_str()).collect();
-    let new_challenges: Vec<Challenge> = result
-        .challenges
-        .iter()
-        .filter(|c| !seen_set.contains(c.slug.as_str()))
-        .cloned()
-        .collect();
+    let mut to_solve = Vec::new();
+    let mut skipped_solved = 0usize;
 
-    for c in &new_challenges {
+    for c in &result.challenges {
+        if seen_set.contains(c.slug.as_str()) {
+            continue;
+        }
         let name = if c.name.is_empty() { &c.slug } else { &c.name };
-        log(&format!("NEW: [{}] {}", c.slug, name));
+        if c.solved {
+            mark_solved(&c.slug);
+            skipped_solved += 1;
+            log(&format!(
+                "already solved on HackerRank, marking seen: [{}] {}",
+                c.slug, name
+            ));
+        } else {
+            log(&format!("NEW: [{}] {}", c.slug, name));
+            to_solve.push(c.clone());
+        }
     }
-    if new_challenges.is_empty() {
+
+    if to_solve.is_empty() && skipped_solved == 0 {
         log(&format!("No new challenges ({} seen).", seen_set.len()));
-    } else if ring {
+    } else if !to_solve.is_empty() && ring {
         play_ring();
     }
-    new_challenges
+    to_solve
 }
 
 fn check(contest: &str, headless: bool, ring: bool) -> Result<Vec<Challenge>, String> {
@@ -965,7 +978,7 @@ fn main() {
 
     match cmd {
         "check" => {
-            let _ = fs::create_dir_all(CHALLENGES_DIR);
+            let _ = fs::create_dir_all(STATE_DIR);
             match check(&contest, headless, ring) {
                 Ok(_) => {}
                 Err(e) => {
@@ -1054,7 +1067,7 @@ fn main() {
             }
         }
         "leaderboard" => {
-            let _ = fs::create_dir_all(CHALLENGES_DIR);
+            let _ = fs::create_dir_all(STATE_DIR);
             match fetch_leaderboard(&contest, headless) {
                 Ok(mut result) => print_leaderboard(&mut result.leaderboard),
                 Err(e) => {

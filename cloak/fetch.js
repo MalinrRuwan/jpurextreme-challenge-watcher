@@ -113,7 +113,11 @@ async function fetchChallenges(page, ctx) {
       credentials: "include",
     });
     const data = await res.json();
-    return (data.models || []).map((m) => ({ slug: m.slug, name: m.name }));
+    return (data.models || []).map((m) => ({
+      slug: m.slug,
+      name: m.name,
+      solved: !!m.solved,
+    }));
   }, contest);
 
   const challenges = [];
@@ -133,6 +137,7 @@ async function fetchChallenges(page, ctx) {
           output_format: m.output_format || "",
           constraints: m.constraints || "",
           url: `https://www.hackerrank.com/contests/${c}/challenges/${m.slug}`,
+          solved: !!m.solved,
         };
       },
       { c: contest, slug: ch.slug }

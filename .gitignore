@@ -10,6 +10,7 @@ watcher/target/
 
 # runtime challenge state — generated per solved challenge, not source
 challenges/
+state/
 
 # release artifacts
 dist/
