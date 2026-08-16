@@ -17,6 +17,7 @@ const CHALLENGES_DIR: &str = "challenges";
 const SEEN_FILE: &str = "challenges/.seen.json";
 const LAST_FETCH_FILE: &str = "challenges/.last_fetch.json";
 const SOLVE_MODEL: &str = "opencode-go/deepseek-v4-flash";
+const VISION_MODEL: &str = "opencode-go/qwen3.7-plus";
 const ENV_FILE: &str = ".hkwatch.env";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -36,6 +37,8 @@ struct Challenge {
     constraints: String,
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -218,6 +221,8 @@ fn watch_persistent(
     headless: bool,
     interval: u64,
     model: &str,
+    vision_model: &str,
+    use_vision: bool,
     skip_current: bool,
     ring: bool,
 ) -> Result<(), String> {
@@ -289,7 +294,7 @@ fn watch_persistent(
                         continue;
                     }
                     for c in new_challenges {
-                        if let Err(e) = solve(&c.slug, Some(&c), model) {
+                        if let Err(e) = solve(&c.slug, Some(&c), model, vision_model, use_vision) {
                             eprintln!("solve {} failed: {e}", c.slug);
                         }
                     }
@@ -304,12 +309,61 @@ fn watch_persistent(
     }
 }
 
-fn solve(slug: &str, challenge: Option<&Challenge>, model: &str) -> Result<(), String> {
+fn vision_transcribe(image: &PathBuf, vision_model: &str) -> Result<String, String> {
+    let prompt = "You are an image transcription assistant for a competitive programming problem. \
+Examine the image carefully and transcribe everything that matters for solving the problem. \
+If it is a grid or diagram, output every row exactly, cell by cell, using a consistent symbol set and the same number of columns per row. \
+If it contains text or data, reproduce it verbatim. Be precise; do not summarize.";
+    let out = Command::new("opencode2")
+        .arg("run")
+        .arg("-m")
+        .arg(vision_model)
+        .arg("--auto")
+        .arg("--format")
+        .arg("json")
+        .arg("-f")
+        .arg(image)
+        .arg("--title")
+        .arg("vision transcription")
+        .arg(prompt)
+        .output()
+        .map_err(|e| format!("failed to run vision model: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut texts: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v["type"] == "text" {
+                if let Some(t) = v["part"]["text"].as_str() {
+                    texts.push(t.to_string());
+                }
+            }
+        }
+    }
+    let joined = texts.join("\n");
+    if joined.trim().is_empty() {
+        Err("vision model returned no transcription".into())
+    } else {
+        Ok(joined)
+    }
+}
+
+fn solve(
+    slug: &str,
+    challenge: Option<&Challenge>,
+    model: &str,
+    vision_model: &str,
+    use_vision: bool,
+) -> Result<(), String> {
     let root = repo_root();
     let dir = root.join(CHALLENGES_DIR).join(slug);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
-    let text = match challenge {
+    let mut text = match challenge {
         Some(c) => {
             let stmt = if !c.body_html.is_empty() {
                 &c.body_html
@@ -330,6 +384,31 @@ fn solve(slug: &str, challenge: Option<&Challenge>, model: &str) -> Result<(), S
         }
         None => format!("Challenge slug: {slug}"),
     };
+
+    if use_vision {
+        let images: Vec<String> = challenge
+            .map(|c| c.images.clone())
+            .unwrap_or_default();
+        if !images.is_empty() {
+            println!(
+                "{} statement image(s) found — transcribing with {vision_model} ...",
+                images.len()
+            );
+            for img in &images {
+                let p = root.join(img);
+                if !p.exists() {
+                    eprintln!("image not found: {}", p.display());
+                    continue;
+                }
+                match vision_transcribe(&p, vision_model) {
+                    Ok(t) => text.push_str(&format!(
+                        "\n\nIMAGE TRANSCRIPTION ({img}):\n{t}"
+                    )),
+                    Err(e) => eprintln!("vision transcription failed for {img}: {e}"),
+                }
+            }
+        }
+    }
 
     let prompt = format!(
         "Solve the following HackerRank contest challenge in Rust.\n\n{text}\n\n\
@@ -401,8 +480,8 @@ fn truncate(s: &str, n: usize) -> String {
 fn usage() {
     println!(
         "hkwatch — HackerRank challenge watcher\n\n\
-Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring]\n  hkwatch solve <slug> [--headless] [--contest <slug>]\n  hkwatch status\n\n\
-Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n\n\
+Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring] [--no-vision] [--vision-model <provider/model>]\n  hkwatch solve <slug> [--headless] [--contest <slug>] [--no-vision] [--vision-model <provider/model>]\n  hkwatch status\n\n\
+Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n  --no-vision      skip transcribing statement images with the vision model\n  --vision-model   vision model for statement images (default {VISION_MODEL}; also HKWATCH_VISION_MODEL env)\n\n\
 Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher (Unix only; Windows: restart with --no-solve).\n\n\
 Default contest: {DEFAULT_CONTEST}\nDefault interval: {DEFAULT_INTERVAL_SECS}s\nSolver model: {SOLVE_MODEL}\nOverride solver: HKWATCH_MODEL env or --model <provider/model>"
     );
@@ -422,6 +501,9 @@ fn main() {
     let mut model = std::env::var("HKWATCH_MODEL").unwrap_or_else(|_| SOLVE_MODEL.to_string());
     let mut skip_current = false;
     let mut ring = std::env::var("HKWATCH_RING").map(|v| v != "0").unwrap_or(true);
+    let mut vision_model = std::env::var("HKWATCH_VISION_MODEL")
+        .unwrap_or_else(|_| VISION_MODEL.to_string());
+    let mut use_vision = true;
 
     let mut iter = args.iter();
     let cmd = iter.next().unwrap();
@@ -433,6 +515,13 @@ fn main() {
             "--no-solve" => SOLVE_ON.store(false, Ordering::SeqCst),
             "--skip-current" => skip_current = true,
             "--no-ring" => ring = false,
+            "--no-vision" => use_vision = false,
+            "--vision-model" => {
+                vision_model = iter
+                    .next()
+                    .expect("--vision-model requires a value")
+                    .clone()
+            }
             "--model" => {
                 model = iter
                     .next()
@@ -470,8 +559,16 @@ fn main() {
         "watch" => {
             #[cfg(unix)]
             setup_solve_toggle();
-            if let Err(e) = watch_persistent(&contest, headless, interval, &model, skip_current, ring)
-            {
+            if let Err(e) = watch_persistent(
+                &contest,
+                headless,
+                interval,
+                &model,
+                &vision_model,
+                use_vision,
+                skip_current,
+                ring,
+            ) {
                 eprintln!("watch failed: {e}");
                 std::process::exit(1);
             }
@@ -489,7 +586,7 @@ fn main() {
                     .into_iter()
                     .find(|c| c.slug == slug)
             });
-            match solve(&slug, ch.as_ref(), &model) {
+            match solve(&slug, ch.as_ref(), &model, &vision_model, use_vision) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("solve failed: {e}");

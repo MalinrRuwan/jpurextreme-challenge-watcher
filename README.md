@@ -10,7 +10,8 @@ write a Rust solution, and runs its sample tests.
    HackerRank's Akamai "Access Denied" bot block). Loads the contest's
    challenges page, then pulls the challenge list and full statements via
    HackerRank's internal REST API from inside the browser session (so any
-   login cookies apply).
+   login cookies apply). It also downloads any `<img>` embedded in a statement
+   to `challenges/<slug>/statement_<n>.<ext>`.
 2. **`watcher/`** — a Rust CLI (`hkwatch`) that polls, diffs, and dispatches.
 3. **`challenges/`** — one folder per challenge: `main.rs`, `tests.sh`, and the
    compiled `main` binary.
@@ -167,6 +168,33 @@ And the always-on recipe used in production:
 # toggle solving off/on mid-run without stopping:
 kill -USR1 $(pgrep -f "hkwatch watch")
 ```
+
+### Statement images → vision model
+
+Some statements embed a diagram/grid as an image (e.g. a map). Before solving,
+`hkwatch` sends every downloaded `statement_<n>.<ext>` image to a vision model
+via `opencode2 run -m <vision-model> -f <image>`, and appends the transcription
+to the solver prompt.
+
+```sh
+# Default vision model (qwen 3.7 Plus), run whenever a statement has images
+./watcher/target/release/hkwatch watch --headless
+
+# Skip image transcription entirely
+./watcher/target/release/hkwatch solve <slug> --no-vision
+
+# Use a different vision model
+./watcher/target/release/hkwatch watch --headless --vision-model opencode-go/qwen3.7-max
+HKWATCH_VISION_MODEL=opencode-go/qwen3.7-max ./watcher/target/release/hkwatch watch --headless
+```
+
+| Flag / env | Meaning |
+| --- | --- |
+| `--no-vision` | Don't transcribe statement images |
+| `--vision-model <provider/model>` | Vision model (default `opencode-go/qwen3.7-plus`; `HKWATCH_VISION_MODEL` env) |
+
+Note: transcription is only as good as the vision model. If a problem's diagram
+is misread, solve with `--no-vision` and check the statement manually.
 
 ## Solve flow
 

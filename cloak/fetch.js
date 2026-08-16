@@ -1,5 +1,7 @@
 const { chromium } = require("playwright-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const fs = require("fs");
+const path = require("path");
 
 chromium.use(StealthPlugin());
 
@@ -57,7 +59,54 @@ async function login(page, username, password) {
   console.error(`[login] now at: ${page.url()} title="${await page.title()}"`);
 }
 
-async function fetchChallenges(page) {
+async function downloadImages(ctx, slug, body_html) {
+  const imageUrls = (() => {
+    // resolve <img src> from the statement HTML
+    const re = /<img[^>]+src=["']([^"']+)["']/gi;
+    const out = [];
+    let m;
+    while ((m = re.exec(body_html)) !== null) {
+      out.push(m[1]);
+    }
+    return out;
+  })();
+
+  const dir = path.join("challenges", slug);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const saved = [];
+  let idx = 0;
+  for (let raw of imageUrls) {
+    let url = raw;
+    if (url.startsWith("//")) url = "https:" + url;
+    else if (url.startsWith("/")) url = "https://www.hackerrank.com" + url;
+    idx += 1;
+    try {
+      const resp = await ctx.request.get(url);
+      if (!resp.ok()) {
+        console.error(`[img ${slug}] HTTP ${resp.status()} for ${url}`);
+        continue;
+      }
+      const ct = resp.headers()["content-type"] || "";
+      const ext = ct.includes("png")
+        ? "png"
+        : ct.includes("jpeg") || ct.includes("jpg")
+        ? "jpg"
+        : ct.includes("gif")
+        ? "gif"
+        : "png";
+      const file = path.join(dir, `statement_${idx}.${ext}`);
+      fs.writeFileSync(file, await resp.body());
+      saved.push(file);
+      console.error(`[img ${slug}] saved ${file} (${url})`);
+    } catch (e) {
+      console.error(`[img ${slug}] failed ${url}: ${e.message}`);
+    }
+  }
+  return saved;
+}
+
+async function fetchChallenges(page, ctx) {
   const list = await page.evaluate(async (c) => {
     const res = await fetch(`/rest/contests/${c}/challenges?offset=0&limit=100&track_login=true`, {
       credentials: "include",
@@ -87,18 +136,20 @@ async function fetchChallenges(page) {
       },
       { c: contest, slug: ch.slug }
     );
-    if (detail) challenges.push(detail);
+    if (!detail) continue;
+    detail.images = await downloadImages(ctx, detail.slug, detail.body_html);
+    challenges.push(detail);
   }
   return challenges;
 }
 
-async function poll(page, pollNo) {
+async function poll(page, ctx, pollNo) {
   const title = await page.title();
   if (title === "Access Denied") {
     console.error(`[poll ${pollNo}] Access Denied, skipping`);
     return;
   }
-  const challenges = await fetchChallenges(page);
+  const challenges = await fetchChallenges(page, ctx);
   const result = { contest, fetched_at: new Date().toISOString(), poll: pollNo, challenges };
   console.log(JSON.stringify(result));
 }
@@ -132,7 +183,7 @@ async function main() {
   await page.waitForTimeout(2000);
 
   if (!watchMode) {
-    await poll(page, 0);
+    await poll(page, ctx, 0);
     await browser.close();
     return;
   }
@@ -152,7 +203,7 @@ async function main() {
         await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
         await page.waitForTimeout(2000);
       }
-      await poll(page, pollNo);
+      await poll(page, ctx, pollNo);
       pollNo += 1;
     } catch (e) {
       console.error(`[poll] error: ${e.message}`);
