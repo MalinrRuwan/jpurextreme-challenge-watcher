@@ -8,6 +8,10 @@ node_modules/
 # rust build
 watcher/target/
 
+# release artifacts
+dist/
+bin/
+
 # compiled challenge binaries
 challenges/*/main
 

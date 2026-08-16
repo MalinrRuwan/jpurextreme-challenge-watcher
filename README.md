@@ -22,6 +22,40 @@ cd cloak && npm install && npx playwright install chromium
 cd ../watcher && cargo build --release
 ```
 
+## Cross-platform setup (automatic)
+
+Ready-made scripts install everything (Node, Rust, Playwright Chromium,
+opencode2) and build or download the `hkwatch` binary:
+
+```sh
+# macOS / Linux / WSL / Git Bash
+bash scripts/setup.sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
+```
+
+Each script ends with the same two next steps: edit `.hkwatch.env` with your
+HackerRank credentials, then run `bin/hkwatch watch --headless --skip-current`.
+
+## Release binaries
+
+Prebuilt `hkwatch` binaries for all platforms are attached to every
+[GitHub release](https://github.com/MalinrRuwan/jpurextreme-challenge-watcher/releases):
+
+| File | Platform |
+| --- | --- |
+| `hkwatch-aarch64-macos` | macOS Apple Silicon |
+| `hkwatch-x86_64-macos` | macOS Intel |
+| `hkwatch-x86_64-linux` | Linux x86_64 |
+| `hkwatch-x86_64-windows.exe` | Windows x86_64 |
+
+The binary needs the repo layout next to it (it locates `cloak/fetch.js`
+relative to its own path), plus `node` + Playwright + opencode2 — install those
+with `scripts/setup.sh` / `scripts/setup.ps1`. New tags (`v*`) trigger
+`.github/workflows/release.yml`, which builds all four binaries on GitHub
+Actions and attaches them automatically.
+
 ## HackerRank login
 
 The contest may be login-gated, so the watcher can authenticate before
@@ -44,22 +78,25 @@ Run from the repo root.
 
 ```sh
 # One poll: report new challenges
-./watcher/target/release/hkwatch check
+./bin/hkwatch check
 
 # Watch loop: polls every 15s, auto-solves each new challenge.
 # The stealth browser is launched ONCE and the page is reloaded in place —
 # the browser is never closed between polls, so the login session persists.
-./watcher/target/release/hkwatch watch
+./bin/hkwatch watch
 
 # Watch with custom interval
-./watcher/target/release/hkwatch watch --interval 30
+./bin/hkwatch watch --interval 30
 
 # Solve a specific challenge (statement looked up from last fetch)
-./watcher/target/release/hkwatch solve <challenge-slug>
+./bin/hkwatch solve <challenge-slug>
 
 # List challenges seen so far
-./watcher/target/release/hkwatch status
+./bin/hkwatch status
 ```
+
+If you built from source instead of using `scripts/setup.sh`, the binary lives
+at `watcher/target/release/hkwatch` — substitute that path.
 
 ### Options
 

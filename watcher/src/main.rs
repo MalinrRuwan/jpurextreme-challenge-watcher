@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,12 +52,32 @@ struct Seen {
 }
 
 fn repo_root() -> PathBuf {
-    let root = std::env::current_dir().expect("cannot read cwd");
-    if root.join("watcher").join("Cargo.toml").exists() {
-        root
-    } else {
-        root
+    std::env::current_dir().expect("cannot read cwd")
+}
+
+fn fetch_script_path() -> PathBuf {
+    if let Ok(p) = std::env::var("HKWATCH_FETCH") {
+        return PathBuf::from(p);
     }
+    let cwd = repo_root();
+    let local = cwd.join(FETCH_SCRIPT);
+    if local.exists() {
+        return local;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for cand in [
+                dir.join(FETCH_SCRIPT),
+                dir.join("..").join(FETCH_SCRIPT),
+                dir.join("..").join("..").join(FETCH_SCRIPT),
+            ] {
+                if cand.exists() {
+                    return cand;
+                }
+            }
+        }
+    }
+    local
 }
 
 fn load_env_file() {
@@ -76,9 +97,8 @@ fn load_env_file() {
 }
 
 fn run_fetch(contest: &str, headless: bool) -> Result<FetchResult, String> {
-    let root = repo_root();
     let mut cmd = Command::new("node");
-    cmd.arg(root.join(FETCH_SCRIPT));
+    cmd.arg(fetch_script_path());
     cmd.arg(contest);
     if headless {
         cmd.arg("--headless");
@@ -124,6 +144,7 @@ fn mark_solved(slug: &str) {
     }
 }
 
+#[cfg(unix)]
 fn setup_solve_toggle() {
     use signal_hook::consts::signal::SIGUSR1;
     use signal_hook::flag;
@@ -200,10 +221,9 @@ fn watch_persistent(
     skip_current: bool,
     ring: bool,
 ) -> Result<(), String> {
-    let root = repo_root();
     let mut cmd = Command::new("node");
-    cmd.arg(root.join(FETCH_SCRIPT))
-        .arg(contest)
+    cmd.arg(fetch_script_path());
+    cmd.arg(contest)
         .arg("--watch")
         .arg("--interval")
         .arg(interval.to_string());
@@ -216,10 +236,16 @@ fn watch_persistent(
     cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
 
     println!("Watching {contest} every {interval}s (browser stays open, Ctrl-C to stop)");
+    #[cfg(unix)]
     println!(
         "Solve mode: {}. Toggle at runtime WITHOUT stopping: kill -USR1 {} (or SIGUSR1)",
         if SOLVE_ON.load(Ordering::SeqCst) { "ON" } else { "OFF" },
         std::process::id()
+    );
+    #[cfg(not(unix))]
+    println!(
+        "Solve mode: {}. Restart the watcher with --no-solve to disable solving.",
+        if SOLVE_ON.load(Ordering::SeqCst) { "ON" } else { "OFF" }
     );
 
     let mut first = true;
@@ -377,7 +403,7 @@ fn usage() {
         "hkwatch — HackerRank challenge watcher\n\n\
 Usage:\n  hkwatch check [--headless] [--contest <slug>] [--no-ring]\n  hkwatch watch [--headless] [--contest <slug>] [--interval <secs>] [--no-solve] [--skip-current] [--no-ring]\n  hkwatch solve <slug> [--headless] [--contest <slug>]\n  hkwatch status\n\n\
 Flags:\n  --no-solve       start with solve mode OFF (report + ring, never auto-solve); watching continues\n  --skip-current   mark challenges already listed on first poll as seen, solve only future new ones\n  --no-ring        disable the ring sound (also HKWATCH_RING=0)\n\n\
-Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher.\n\n\
+Runtime:\n  During `watch`, send SIGUSR1 (kill -USR1 <pid>) to toggle solve mode ON/OFF without stopping the watcher (Unix only; Windows: restart with --no-solve).\n\n\
 Default contest: {DEFAULT_CONTEST}\nDefault interval: {DEFAULT_INTERVAL_SECS}s\nSolver model: {SOLVE_MODEL}\nOverride solver: HKWATCH_MODEL env or --model <provider/model>"
     );
 }
@@ -442,6 +468,7 @@ fn main() {
             }
         }
         "watch" => {
+            #[cfg(unix)]
             setup_solve_toggle();
             if let Err(e) = watch_persistent(&contest, headless, interval, &model, skip_current, ring)
             {
