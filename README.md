@@ -8,10 +8,12 @@ write a Rust solution, and runs its sample tests.
 
 1. **`cloak/fetch.js`** — Playwright + `puppeteer-extra-plugin-stealth` (bypasses
    HackerRank's Akamai "Access Denied" bot block). Loads the contest's
-   challenges page, then pulls the challenge list and full statements via
-   HackerRank's internal REST API from inside the browser session (so any
-   login cookies apply). It also downloads any `<img>` embedded in a statement
-   to `challenges/<slug>/statement_<n>.<ext>`.
+   challenges page once, then polls HackerRank's REST API in-page (no page
+   reloads). Challenges already `solved` on the site are returned list-only —
+   no statement fetch, no image download. For unsolved challenges it pulls the
+   full statement and downloads any embedded `<img>` to
+   `challenges/<slug>/statement_<n>.<ext>` (skipped if the file already
+   exists).
 2. **`watcher/`** — a Rust CLI (`hkwatch`) that polls, diffs, and dispatches.
 3. **`challenges/`** — runtime-only, one folder per solved challenge
    (`main.rs`, `tests.sh`). Generated on disk as challenges are fetched/solved;

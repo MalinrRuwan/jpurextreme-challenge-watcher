@@ -97,6 +97,10 @@ async function downloadImages(ctx, slug, body_html) {
         ? "gif"
         : "png";
       const file = path.join(dir, `statement_${idx}.${ext}`);
+      if (fs.existsSync(file)) {
+        saved.push(file);
+        continue;
+      }
       fs.writeFileSync(file, await resp.body());
       saved.push(file);
       console.error(`[img ${slug}] saved ${file} (${url})`);
@@ -113,15 +117,27 @@ async function fetchChallenges(page, ctx) {
       credentials: "include",
     });
     const data = await res.json();
-    return (data.models || []).map((m) => ({
-      slug: m.slug,
-      name: m.name,
-      solved: !!m.solved,
-    }));
+    const seen = new Set();
+    return (data.models || [])
+      .filter((m) => {
+        if (seen.has(m.slug)) return false;
+        seen.add(m.slug);
+        return true;
+      })
+      .map((m) => ({
+        slug: m.slug,
+        name: m.name,
+        solved: !!m.solved,
+      }));
   }, contest);
 
   const challenges = [];
   for (const ch of list) {
+    if (ch.solved) {
+      // already solved on the site: no detail, no image download
+      challenges.push({ slug: ch.slug, name: ch.name, solved: true });
+      continue;
+    }
     const detail = await page.evaluate(
       async ({ c, slug }) => {
         const res = await fetch(`/rest/contests/${c}/challenges/${slug}`, { credentials: "include" });
@@ -210,7 +226,7 @@ async function main() {
   }
 
   await page.goto(`${BASE}/challenges`, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(800);
 
   if (leaderboardMode) {
     const models = [];
@@ -247,19 +263,12 @@ async function main() {
 
   let pollNo = 1;
   let busy = false;
-  let first = true;
 
   const tick = async () => {
     if (busy) return;
     busy = true;
     try {
-      if (first) {
-        first = false;
-      } else {
-        console.error(`[poll ${pollNo}] reloading ${BASE}/challenges`);
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
-        await page.waitForTimeout(2000);
-      }
+      console.error(`[poll ${pollNo}] fetching ${BASE}/challenges`);
       await poll(page, ctx, pollNo);
       pollNo += 1;
     } catch (e) {
