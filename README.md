@@ -29,13 +29,14 @@ fetching. Credentials are loaded from `.hkwatch.env` at the repo root (or from
 the `HKWATCH_USERNAME` / `HKWATCH_PASSWORD` env vars):
 
 ```sh
-HKWATCH_USERNAME=UC193_TerraForge
-HKWATCH_PASSWORD=#Terra_Forge@12345
+HKWATCH_USERNAME=your_hackerrank_username
+HKWATCH_PASSWORD=your_hackerrank_password
 ```
 
 When both vars are present, `hkwatch` automatically passes `--login` to
 `fetch.js`, which signs into HackerRank with the stealth browser before reading
 the challenge list. Keep `.hkwatch.env` private — it contains credentials.
+A template lives at `.hkwatch.env.example`.
 
 ## Usage
 
@@ -86,6 +87,49 @@ kill -USR1 <pid>   # toggle solve mode back ON
 While OFF, detected challenges are marked as seen (so they aren't re-rung on
 every poll) but not solved. To solve one later, run `hkwatch solve <slug>` or
 remove its slug from `challenges/.seen.json` and let the watcher pick it up.
+
+### Command combinations
+
+Practical one-liners (run from the repo root, add `--headless` wherever you
+don't want a visible browser window):
+
+```sh
+# Full auto: watch headless, solve every new challenge, ring on discovery
+./watcher/target/release/hkwatch watch --headless
+
+# Report-only: ring on new challenges but never auto-solve (watching continues)
+./watcher/target/release/hkwatch watch --headless --no-solve
+
+# Skip challenges already posted: only solve genuinely new ones that appear
+./watcher/target/release/hkwatch watch --headless --skip-current
+
+# Custom polling interval (faster or slower than the default 15s)
+./watcher/target/release/hkwatch watch --headless --interval 5
+./watcher/target/release/hkwatch watch --headless --interval 60
+
+# Quiet report-only: no ring sound, headless, never solve
+HKWATCH_RING=0 ./watcher/target/release/hkwatch watch --headless --no-solve
+
+# One-shot check and manual control
+./watcher/target/release/hkwatch check --headless
+./watcher/target/release/hkwatch solve <challenge-slug>
+./watcher/target/release/hkwatch status
+
+# Use a different solver model
+./watcher/target/release/hkwatch watch --headless --model opencode/deepseek-v4-flash-free
+
+# Force a re-solve: drop the slug from .seen.json, then watch
+# (or solve it directly from the last fetched statement)
+./watcher/target/release/hkwatch solve <challenge-slug>
+```
+
+And the always-on recipe used in production:
+
+```sh
+./watcher/target/release/hkwatch watch --headless --skip-current
+# toggle solving off/on mid-run without stopping:
+kill -USR1 $(pgrep -f "hkwatch watch")
+```
 
 ## Solve flow
 
